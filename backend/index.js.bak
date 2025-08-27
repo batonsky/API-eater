@@ -1,0 +1,312 @@
+/**
+ * Backend patch: enforce GPT‑5
+ * - OPENAI_MODEL defaults to "gpt-5" and no automatic fallback.
+ * - OpenAI errors are returned to chat so you see the real cause.
+ * - Keeps: /api/env-file, /api/env, web.search, http, script.save/run, path/baseVar, auto-Authorization.
+ */
+
+const fs = require('fs');
+const path = require('path');
+const express = require('express');
+const cors = require('cors');
+const dns = require('dns').promises;
+const net = require('net');
+const dotenv = require('dotenv');
+
+dotenv.config();
+
+const app = express();
+const PORT = Number(process.env.PORT || 4001);
+
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json({ limit: '4mb' }));
+
+const DATA_DIR = path.resolve(__dirname, 'data');
+const ENV_FILE = path.join(__dirname, '.env');
+const JSON_ENV_FILE = path.join(DATA_DIR, 'env.json');
+const SCRIPTS_FILE = path.join(DATA_DIR, 'scripts.json');
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+function readJsonSafe(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+function writeJsonSafe(file, obj) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+}
+function readDotenvFile() {
+  try {
+    const txt = fs.readFileSync(ENV_FILE, 'utf8');
+    const parsed = dotenv.parse(txt);
+    return { txt, parsed };
+  } catch {
+    return { txt: '', parsed: {} };
+  }
+}
+function mergeEnv() {
+  const { parsed } = readDotenvFile();
+  const jsonEnv = readJsonSafe(JSON_ENV_FILE, {});
+  return { ...process.env, ...jsonEnv, ...parsed };
+}
+function mask(v){ if(!v) return ''; const s=String(v); return s.length<=6?'****':s.slice(0,3)+'…'+s.slice(-3); }
+function publicEnvView(){
+  const e = mergeEnv();
+  const out = {};
+  for (const k of Object.keys(e)) {
+    if (/_BASE_URL$/.test(k) || /(OPENAI_MODEL|SERPAPI_API_KEY|BING_SEARCH_API_KEY|OPENAI_API_KEY)/.test(k)) {
+      out[k] = /(KEY|TOKEN)/.test(k) ? mask(e[k]) : e[k];
+    }
+  }
+  if (!out['OPENAI_MODEL']) out['OPENAI_MODEL'] = e.OPENAI_MODEL || 'gpt-5';
+  return out;
+}
+
+// ---- safe HTTP ----
+function isPrivateIP(ip){ const net=require('net'); if(!net.isIP(ip)) return false; const p=ip.split('.').map(Number); if(p[0]===10) return true; if(p[0]===172&&p[1]>=16&&p[1]<=31) return true; if(p[0]===192&&p[1]===168) return true; if(p[0]===127) return true; if(p[0]===169&&p[1]===254) return true; return false; }
+async function assertPublicHostname(urlStr){ const {lookup}=require('dns').promises; const u=new URL(urlStr); if(!/^https?:$/.test(u.protocol)) throw new Error('Only http/https are allowed'); const host=u.hostname; if(require('net').isIP(host)){ if(isPrivateIP(host)) throw new Error('Private IPs are blocked'); return; } const {address}=await lookup(host); if(isPrivateIP(address)) throw new Error('Private IPs are blocked'); }
+function pickBaseForPath(env, baseVar) {
+  if (baseVar && env[baseVar]) return env[baseVar];
+  const baseKeys = Object.keys(env).filter(k => /_BASE_URL$/.test(k));
+  if (baseKeys.length === 1) return env[baseKeys[0]];
+  if (baseKeys.length === 0) throw new Error('No *_BASE_URL found; provide args.url or set a BASE_URL');
+  throw new Error('Multiple *_BASE_URL found; specify args.baseVar');
+}
+function findTokenForUrl(env, url) {
+  try {
+    const u = new URL(url);
+    const baseKeys = Object.keys(env).filter(k => /_BASE_URL$/.test(k));
+    for (const bk of baseKeys) {
+      const base = String(env[bk] || '').replace(/\/$/,'');
+      if (!base) continue;
+      const bu = new URL(base);
+      if (bu.host === u.host) {
+        const prefix = bk.replace(/_BASE_URL$/, '');
+        for (const cand of [`${prefix}_TOKEN`, `${prefix}_API_KEY`, 'API_TOKEN', 'TOKEN', 'API_KEY']) {
+          if (env[cand]) return { header:'Authorization', value:`Bearer ${env[cand]}` };
+        }
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+async function safeFetch({method='GET',url,headers={},body}){
+  await assertPublicHostname(url);
+  const init={method,headers};
+  if(method!=='GET' && method!=='HEAD'){
+    init.body=body??undefined;
+    if(!init.headers['content-type'] && typeof body==='string' && body.trim().startsWith('{'))
+      init.headers['content-type']='application/json';
+  }
+  const start=Date.now();
+  const r=await fetch(url,init);
+  const ms=Date.now()-start;
+  const buf=await r.arrayBuffer();
+  const text=Buffer.from(buf).toString('utf8');
+  const headersOut={}; r.headers.forEach((v,k)=>headersOut[k]=v);
+  return { ok:r.ok, status:r.status, statusText:r.statusText, durationMs:ms, sizeBytes:buf.byteLength, headers:headersOut, bodyText:text, contentType:headersOut['content-type']||'' };
+}
+
+// ---- web search ----
+async function webSearch(q){
+  const env = mergeEnv();
+  if (env.BING_SEARCH_API_KEY) {
+    const u = new URL('https://api.bing.microsoft.com/v7.0/search');
+    u.searchParams.set('q', q); u.searchParams.set('mkt', 'en-US');
+    const r = await fetch(u.toString(), { headers:{'Ocp-Apim-Subscription-Key': env.BING_SEARCH_API_KEY} });
+    if (!r.ok) throw new Error('Bing Search error: '+r.status);
+    const d = await r.json(); const web = d.webPages?.value || [];
+    return web.slice(0,6).map(x=>({ title:x.name, url:x.url, snippet:x.snippet, displayUrl:x.displayUrl }));
+  }
+  if (env.SERPAPI_API_KEY) {
+    const u = new URL('https://serpapi.com/search.json');
+    u.searchParams.set('engine','google'); u.searchParams.set('q', q); u.searchParams.set('api_key', env.SERPAPI_API_KEY);
+    const r = await fetch(u.toString()); if(!r.ok) throw new Error('SerpAPI error: '+r.status);
+    const d = await r.json();
+    return (d.organic_results||[]).slice(0,6).map(x=>({ title:x.title, url:x.link, snippet:x.snippet, displayUrl:x.displayed_link }));
+  }
+  throw new Error('SEARCH_NOT_CONFIGURED');
+}
+
+// ---- OpenAI (enforce gpt-5) ----
+async function callOpenAI(messages){
+  const env = mergeEnv();
+  if (!env.OPENAI_API_KEY) {
+    return { role:'assistant', content:'Не задан OPENAI_API_KEY. Откройте .env и добавьте ключ.' };
+  }
+  const model = env.OPENAI_MODEL || 'gpt-5';
+
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method:'POST',
+    headers:{ 'Authorization':`Bearer ${env.OPENAI_API_KEY}`, 'Content-Type':'application/json' },
+    body: JSON.stringify({ model, messages, temperature: 0.2 })
+  });
+  const data = await r.json();
+  if (!r.ok || data.error) {
+    const msg = data?.error?.message || r.statusText || 'OpenAI API error';
+    return { role:'assistant', content:`Ошибка модели (${model}): ${msg}` };
+  }
+  const message = data.choices?.[0]?.message || { role:'assistant', content:'Пустой ответ модели.' };
+  return message;
+}
+
+function extractToolCall(text){ const m = text.match(/```tool\s+([\s\S]+?)\s+```/); if(!m) return null; try{ return JSON.parse(m[1]); }catch{ return null; } }
+
+const SYSTEM_PROMPT = `Ты — универсальный агент по работе с внешними API.
+Шаги: env.list → при нехватке данных попроси пользователя → web.search (по необходимости) → http → при ошибке исправь и повтори → script.save и при нужде script.run.
+Ровно один инструмент на шаг, формат:
+\`\`\`tool
+{ "tool":"http", "args":{ "method":"GET", "url":"https://..." } }
+\`\`\`
+или
+\`\`\`tool
+{ "tool":"web.search", "args":{ "q":"..." } }
+\`\`\`
+Поддержка { "path":"api/...", "baseVar":"FOO_BASE_URL" } и авто-Authorization по *_TOKEN/_API_KEY.`;
+
+app.get('/api/health', (_req,res)=>res.json({ok:true}));
+
+app.get('/api/env', (_req,res)=>{
+  const e = publicEnvView();
+  const merged = mergeEnv();
+  const missing = [];
+  if (!merged.OPENAI_API_KEY) missing.push('OPENAI_API_KEY');
+  const baseKeys = Object.keys(merged).filter(k=>/_BASE_URL$/.test(k));
+  if (baseKeys.length === 0) missing.push('*_BASE_URL');
+  res.json({ values:e, missing });
+});
+
+app.get('/api/env-file', (_req,res)=>{
+  const { txt } = readDotenvFile();
+  res.json({ path: ENV_FILE, content: txt });
+});
+app.post('/api/env-file', (req,res)=>{
+  const content = String(req.body?.content || '');
+  try {
+    if (fs.existsSync(ENV_FILE)) {
+      const bak = ENV_FILE + '.' + new Date().toISOString().replace(/[:.]/g,'-') + '.bak';
+      fs.copyFileSync(ENV_FILE, bak);
+    }
+  } catch {}
+  fs.writeFileSync(ENV_FILE, content);
+  res.json({ ok:true });
+});
+
+app.get('/api/scripts', (_req,res) => res.json(readJsonSafe(SCRIPTS_FILE, { scripts: [] })));
+app.post('/api/scripts', (req,res)=>{
+  const s = req.body || {};
+  if (!s || !s.request) return res.status(400).json({ error:'Bad script' });
+  s.id = s.id || Math.random().toString(36).slice(2,10);
+  s.createdAt = s.createdAt || new Date().toISOString();
+  s.updatedAt = new Date().toISOString();
+  const data = readJsonSafe(SCRIPTS_FILE, { scripts: [] });
+  const idx = data.scripts.findIndex(x=>x.id===s.id);
+  if (idx>=0) data.scripts[idx]=s; else data.scripts.unshift(s);
+  writeJsonSafe(SCRIPTS_FILE, data);
+  res.json({ ok:true, id:s.id });
+});
+
+app.post('/api/agent/chat', async (req,res)=>{
+  const { messages=[], allowWeb=true, allowHttp=true } = req.body || {};
+  const steps = [];
+  let convo = [{ role:'system', content: SYSTEM_PROMPT }, ...messages];
+
+  for (let i=0;i<8;i++){
+    const reply = await callOpenAI(convo);
+    const content = reply.content || '';
+    const tool = extractToolCall(content);
+    if (!tool) return res.json({ reply, steps });
+
+    try{
+      if (tool.tool === 'env.list') {
+        const env = mergeEnv();
+        const present = Object.fromEntries(Object.keys(env).map(k => [k, !!env[k]]));
+        steps.push({ tool:'env.list', ok:true, result: present });
+        convo.push({ role:'user', content:'РЕЗУЛЬТАТ ИНСТРУМЕНТА env.list:\n'+ JSON.stringify(present).slice(0,4000) });
+        continue;
+      }
+      if (tool.tool === 'web.search') {
+        if (!allowWeb) throw new Error('Web search disabled');
+        const q = (tool.args && tool.args.q) || '';
+        const result = await webSearch(q);
+        steps.push({ tool:'web.search', ok:true, args:{q}, result });
+        convo.push({ role:'user', content:'РЕЗУЛЬТАТ ИНСТРУМЕНТА web.search:\n'+ JSON.stringify(result).slice(0,4000) });
+        continue;
+      }
+      if (tool.tool === 'http') {
+        if (!allowHttp) throw new Error('HTTP disabled');
+        const args = tool.args || {};
+        const env = mergeEnv();
+        let url = args.url;
+        if (!url && args.path) {
+          const base = pickBaseForPath(env, args.baseVar);
+          const p = String(args.path).replace(/^\//,'');
+          url = String(base || '').replace(/\/$/,'') + '/' + p;
+        }
+        if (!url) throw new Error('No url/path');
+        const headers = args.headers || {};
+        const hasAuth = Object.keys(headers).some(k=>/^authorization$/i.test(k));
+        if (!hasAuth) {
+          const tok = findTokenForUrl(env, url);
+          if (tok) headers[tok.header] = tok.value;
+        }
+        const result = await safeFetch({ method: args.method || 'GET', url, headers, body: args.body || '' });
+        steps.push({ tool:'http', ok:true, args:{ method: args.method||'GET', url }, result: { status: result.status, ok: result.ok, contentType: result.contentType, sample: result.bodyText.slice(0,1200) } });
+        convo.push({ role:'user', content:'РЕЗУЛЬТАТ ИНСТРУМЕНТА http:\n'+ JSON.stringify(result).slice(0,4000) });
+        continue;
+      }
+      if (tool.tool === 'script.save') {
+        const s = tool.args || {};
+        s.id = s.id || Math.random().toString(36).slice(2,10);
+        s.createdAt = s.createdAt || new Date().toISOString();
+        s.updatedAt = new Date().toISOString();
+        const data = readJsonSafe(SCRIPTS_FILE, { scripts: [] });
+        const idx = data.scripts.findIndex(x=>x.id===s.id);
+        if (idx>=0) data.scripts[idx]=s; else data.scripts.unshift(s);
+        writeJsonSafe(SCRIPTS_FILE, data);
+        steps.push({ tool:'script.save', ok:true, result:{ id:s.id, name:s.name||'' } });
+        convo.push({ role:'user', content:'РЕЗУЛЬТАТ ИНСТРУМЕНТА script.save:\n'+ JSON.stringify({ id:s.id, name:s.name||'' }) });
+        continue;
+      }
+      if (tool.tool === 'script.run') {
+        const a = tool.args || {};
+        let reqSpec = a.request;
+        if (!reqSpec && a.id) {
+          const data = readJsonSafe(SCRIPTS_FILE, { scripts: [] });
+          const found = data.scripts.find(x=>x.id===a.id);
+          if (!found) throw new Error('Script not found: '+a.id);
+          reqSpec = found.request;
+        }
+        if (!reqSpec) throw new Error('No request provided');
+        const env = mergeEnv();
+        let url = reqSpec.url;
+        if (!url && reqSpec.path) {
+          const base = pickBaseForPath(env, reqSpec.baseVar);
+          const p = String(reqSpec.path).replace(/^\//,'');
+          url = String(base || '').replace(/\/$/,'') + '/' + p;
+        }
+        if (!url) throw new Error('No url for script.run');
+        const headers = reqSpec.headers || {};
+        const hasAuth = Object.keys(headers).some(k=>/^authorization$/i.test(k));
+        if (!hasAuth) {
+          const tok = findTokenForUrl(env, url);
+          if (tok) headers[tok.header] = tok.value;
+        }
+        const result = await safeFetch({ method: reqSpec.method || 'GET', url, headers, body: reqSpec.body || '' });
+        steps.push({ tool:'script.run', ok:true, args:{ method:reqSpec.method||'GET', url }, result:{ status: result.status, ok: result.ok, contentType: result.contentType, sample: result.bodyText.slice(0,1200) } });
+        convo.push({ role:'user', content:'РЕЗУЛЬТАТ ИНСТРУМЕНТА script.run:\n'+ JSON.stringify(result).slice(0,4000) });
+        continue;
+      }
+
+      throw new Error('UNKNOWN_TOOL: '+tool.tool);
+    } catch (e) {
+      steps.push({ tool: tool.tool || 'unknown', ok:false, error: (e && e.message) || String(e) });
+      convo.push({ role:'user', content:'ИНСТРУМЕНТ ВЫДАЛ ОШИБКУ '+(tool.tool||'unknown')+': '+((e && e.message) || String(e)) });
+      continue;
+    }
+  }
+
+  const final = await callOpenAI(convo);
+  res.json({ reply: final, steps });
+});
+
+app.listen(PORT, ()=>console.log(`✅ Backend (GPT‑5 enforced) on http://0.0.0.0:${PORT}`));
