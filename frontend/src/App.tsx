@@ -18,10 +18,6 @@ function iconForTool(t: string) {
 }
 
 export default function App() {
-  const [envText, setEnvText] = useState("");
-  const [envLoading, setEnvLoading] = useState(false);
-  const [envSaving, setEnvSaving] = useState(false);
-
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Msg[]>([
     {
@@ -45,50 +41,41 @@ export default function App() {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, steps]);
 
-  // ENV load/save
-  const reloadEnv = async () => {
-    setEnvLoading(true);
-    try {
-      const r = await fetch(`${API_BASE}/api/env-file`);
-      const j = await r.json();
-      setEnvText(j.content || "");
-    } catch (e) {
-      setEnvText(`# не удалось получить backend/.env: ${String(e)}`);
-    } finally {
-      setEnvLoading(false);
-    }
-  };
-  const saveEnv = async () => {
-    setEnvSaving(true);
-    try {
-      await fetch(`${API_BASE}/api/env-file`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: envText }),
-      });
-    } finally {
-      setEnvSaving(false);
-    }
-  };
-  useEffect(() => {
-    reloadEnv();
-  }, []);
+  // No .env editor anymore
 
   // Connections load/save
   const reloadConns = async () => {
     try {
       const r = await fetch(`${API_BASE}/api/connections`);
-      const j = await r.json();
+      const t = await r.text();
+      const j = t ? JSON.parse(t) : { connections: [] };
       setConnections(j.connections || []);
-    } catch {}
+    } catch (e) {
+      console.warn("Failed to load connections:", e);
+    }
   };
+  const [connSaving, setConnSaving] = useState(false);
+  const [connNotice, setConnNotice] = useState<string>("");
   const saveConn = async () => {
-    const body = { ...connForm };
-    if (!body.id && body.name) body.id = body.name;
-    await fetch(`${API_BASE}/api/connections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    setConnForm({ id: "", name: "", baseUrl: "", token: "", openapiUrl: "", apiDocUrl: "" });
-    reloadConns();
-    reloadEnv();
+    try {
+      setConnSaving(true);
+      setConnNotice("");
+      const body = { ...connForm };
+      if (!body.id && body.name) body.id = body.name;
+      const r = await fetch(`${API_BASE}/api/connections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!r.ok) {
+        const msg = await r.text();
+        throw new Error(`Не удалось сохранить (${r.status}): ${msg}`);
+      }
+      setConnForm({ id: "", name: "", baseUrl: "", token: "", openapiUrl: "", apiDocUrl: "" });
+      setConnNotice("Сохранено");
+      reloadConns();
+    } catch (e: any) {
+      setConnNotice("Ошибка сохранения: " + String(e?.message || e));
+    } finally {
+      setConnSaving(false);
+      setTimeout(() => setConnNotice(""), 3000);
+    }
   };
   const deleteConn = async (id: string) => {
     await fetch(`${API_BASE}/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -117,7 +104,11 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: [...messages, mUser], allowWeb: true, allowHttp: true }),
       });
-      const j = await r.json();
+      const text = await r.text();
+      let j: any;
+      try { j = text ? JSON.parse(text) : null; } catch {
+        throw new Error(`Неверный JSON от backend (status ${r.status}): ${text.slice(0,200)}`);
+      }
       const actionMsgs: Msg[] = Array.isArray(j.steps)
         ? (j.steps as Step[]).map((s: Step) => ({
             role: "assistant",
@@ -225,9 +216,10 @@ export default function App() {
             </div>
             <div className="section">
               <div className="row">
-                <button className="btn primary" onClick={saveConn}>Сохранить подключение</button>
+                <button className="btn primary" onClick={saveConn} disabled={connSaving}>{connSaving ? "Сохраняю…" : "Сохранить подключение"}</button>
                 <button className="btn" onClick={reloadConns}>Обновить</button>
               </div>
+              {connNotice && <div className="small" style={{ marginTop: 6 }}>{connNotice}</div>}
               <div className="small" style={{ marginTop: 8 }}>
                 После сохранения переменные доступны как: <span className="mono">ID_BASE_URL</span>, <span className="mono">ID_TOKEN</span>, <span className="mono">ID_OPENAPI_URL</span>, <span className="mono">ID_API_DOC_URL</span>.
               </div>
@@ -254,24 +246,9 @@ export default function App() {
             </div>
           </div>
 
-          <div className="card">
-            <div className="header">.env (backend/.env)</div>
-            <div className="section">
-              <textarea className="textarea" value={envText} onChange={(e) => setEnvText(e.target.value)} placeholder="# Здесь будет реальное содержимое backend/.env" />
-            </div>
-            <div className="section">
-              <div className="row">
-                <button className="btn primary" onClick={saveEnv} disabled={envSaving}>{envSaving ? "Сохраняю…" : "Сохранить"}</button>
-                <button className="btn" onClick={reloadEnv} disabled={envLoading}>Обновить</button>
-              </div>
-              <div className="small" style={{ marginTop: 8 }}>
-                В .env храните ключи модели и провайдеров поиска: <span className="mono">OPENAI_API_KEY</span>, <span className="mono">OPENAI_MODEL</span>, <span className="mono">BING_SEARCH_API_KEY</span>, <span className="mono">SERPAPI_API_KEY</span>, <span className="mono">GOOGLE_API_KEY</span>, <span className="mono">GOOGLE_CSE_ID</span>, <span className="mono">BRAVE_SEARCH_API_KEY</span>.
-              </div>
-            </div>
-          </div>
+          {/* .env panel removed by request */}
         </div>
       </div>
     </div>
   );
 }
-

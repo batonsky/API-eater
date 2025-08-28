@@ -341,20 +341,21 @@ app.post("/api/scripts", function(req,res){
 
 /* ---------- CHAT LOOP ---------- */
 app.post("/api/agent/chat", async function(req,res){
-  const body = req.body || {};
-  const messages = Array.isArray(body.messages) ? body.messages : [];
-  const allowWeb = (body.allowWeb!==false);
-  const allowHttp = (body.allowHttp!==false);
-  const steps = [];
-  let convo = [{ role:"system", content: SYSTEM_PROMPT }].concat(messages);
+  try {
+    const body = req.body || {};
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    const allowWeb = (body.allowWeb!==false);
+    const allowHttp = (body.allowHttp!==false);
+    const steps = [];
+    let convo = [{ role:"system", content: SYSTEM_PROMPT }].concat(messages);
 
-  for (let i=0;i<12;i++){
-    const reply = await callOpenAI(convo);
-    const content = reply.content || "";
-    const tool = extractToolCall(content);
-    if (!tool) { return res.json({ reply, steps }); }
+    for (let i=0;i<12;i++){
+      const reply = await callOpenAI(convo);
+      const content = reply.content || "";
+      const tool = extractToolCall(content);
+      if (!tool) { return res.json({ reply, steps }); }
 
-    try{
+      try{
       if (tool.tool === "env.list") {
         const e = mergeEnv(); const present = {}; Object.keys(e).forEach(function(k){ present[k] = !!e[k]; });
         steps.push({ tool:"env.list", ok:true, result: present });
@@ -496,16 +497,21 @@ app.post("/api/agent/chat", async function(req,res){
         continue;
       }
 
-      throw new Error("UNKNOWN_TOOL: "+tool.tool);
-    } catch (e) {
-      steps.push({ tool: tool.tool || "unknown", ok:false, error: (e && e.message) || String(e) });
-      convo.push({ role:"user", content:"ИНСТРУМЕНТ ВЫДАЛ ОШИБКУ "+(tool.tool||"unknown")+": "+((e && e.message) || String(e)) });
-      continue;
+        throw new Error("UNKNOWN_TOOL: "+tool.tool);
+      } catch (e) {
+        steps.push({ tool: tool.tool || "unknown", ok:false, error: (e && e.message) || String(e) });
+        convo.push({ role:"user", content:"ИНСТРУМЕНТ ВЫДАЛ ОШИБКУ "+(tool.tool||"unknown")+": "+((e && e.message) || String(e)) });
+        continue;
+      }
     }
-  }
 
-  const final = await callOpenAI(convo);
-  res.json({ reply: final, steps });
+    const final = await callOpenAI(convo);
+    res.json({ reply: final, steps });
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    console.error("/api/agent/chat error:", msg);
+    res.status(500).json({ reply: { role: "assistant", content: "Ошибка при выполнении запроса: " + msg }, steps: [] });
+  }
 });
 
 /* ---------- START ---------- */
