@@ -1,160 +1,188 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-// Derive API base from current host by default (works when frontend is opened via server IP/domain)
-const DEFAULT_API = (() => {
-  if (typeof window !== 'undefined') {
-    const proto = window.location.protocol;
-    const host = window.location.hostname;
-    // assume backend on 4001; override with VITE_API_URL if needed
-    return `${proto}//${host}:4001`;
-  }
-  return 'http://localhost:4001';
-})();
-const API_BASE = (import.meta.env.VITE_API_URL as string) || DEFAULT_API;
+type Msg = { role: "user" | "assistant" | "system"; content: string };
+type Step =
+  | { tool: string; ok: boolean; args?: any; result?: any; error?: string };
 
-type Msg = { role: 'user' | 'assistant', content: string }
-type Step = { tool: string, ok: boolean, args?: any, result?: any, error?: string }
+const API_BASE =(import.meta as any).env.VITE_API_BASE || (typeof window !== "undefined" ? window.location.origin.replace(/:\d+$/, ":4001"): "http://localhost:4001");
 
-export default function App(){
+export default function App() {
+  const [envText, setEnvText] = useState<string>("");
+  const [envLoading, setEnvLoading] = useState<boolean>(false);
+  const [envSaving, setEnvSaving] = useState<boolean>(false);
+
+  const [input, setInput] = useState<string>("");
   const [messages, setMessages] = useState<Msg[]>([
-    { role: 'assistant', content: 'Привет! Я универсальный агент по API. Напиши задачу (например: «создай элемент в приложении operacii в разделе beton (ELMA365)»). Я сам проверю .env, найду доку, соберу и выполню запрос.' }
-  ])
-  const [input, setInput] = useState('')
-  const [sending, setSending] = useState(false)
+    { role: "assistant", content:
+`Привет! Я универсальный агент по API (модель: gpt-5).
+Напиши задачу (например: «создай элемент в приложении operacii в разделе beton (ELMA365)»).
+Я посмотрю .env, прочту OpenAPI/Docs (если указаны), соберу и выполню запрос и дам лог шагов.` }
+  ]);
+  const [steps, setSteps] = useState<Step[]>([]);
+  const [busy, setBusy] = useState<boolean>(false);
 
-  const [envSummary, setEnvSummary] = useState<{values:Record<string,string>, missing:string[]}>({values:{}, missing:[]})
-  const [envText, setEnvText] = useState('')
-  const [envPath, setEnvPath] = useState<string>('')
-  const [envChanged, setEnvChanged] = useState(false)
-  const [envError, setEnvError] = useState<string>('')
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, steps]);
 
-  const [steps, setSteps] = useState<Step[]>([])
-  const listRef = useRef<HTMLDivElement>(null)
-
-  async function loadEnvSummary(){
-    try{
-      const r = await fetch(`${API_BASE}/api/env`)
-      if(!r.ok) throw new Error(`GET /api/env ${r.status}`)
-      const d = await r.json()
-      setEnvSummary(d)
-    }catch(e:any){
-      setEnvError(e?.message || String(e))
+  // --- ENV load/save ---
+  const reloadEnv = async () => {
+    setEnvLoading(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/env-file`);
+      const j = await r.json();
+      setEnvText(j.content || "");
+    } catch (e) {
+      setEnvText(`# не удалось получить backend/.env: ${String(e)}`);
+    } finally {
+      setEnvLoading(false);
     }
-  }
-  async function loadEnvFile(){
-    try{
-      const r = await fetch(`${API_BASE}/api/env-file`)
-      if(!r.ok) throw new Error(`GET /api/env-file ${r.status}`)
-      const d = await r.json()
-      setEnvText(d.content ?? '')
-      setEnvPath(d.path || '')
-      setEnvChanged(false)
-      setEnvError('')
-    }catch(e:any){
-      setEnvError(e?.message || String(e))
+  };
+  const saveEnv = async () => {
+    setEnvSaving(true);
+    try {
+      await fetch(`${API_BASE}/api/env-file`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: envText }),
+      });
+    } finally {
+      setEnvSaving(false);
     }
-  }
-  useEffect(()=>{ loadEnvSummary(); loadEnvFile(); },[])
+  };
+  useEffect(() => { reloadEnv(); }, []);
 
-  async function saveEnvFile(){
-    try{
-      const r = await fetch(`${API_BASE}/api/env-file`, {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify({ content: envText })
-      })
-      if(!r.ok) throw new Error(`POST /api/env-file ${r.status}`)
-      setEnvChanged(false)
-      await loadEnvSummary()
-    }catch(e:any){
-      setEnvError(e?.message || String(e))
-    }
-  }
-
-  async function send(){
-    const text = input.trim()
-    if(!text) return
-    const next = [...messages, { role:'user' as const, content: text }]
-    setMessages(next); setInput(''); setSending(true)
-    try{
+  // --- Chat call ---
+  const send = async () => {
+    const text = input.trim();
+    if (!text || busy) return;
+    const next = [...messages, { role: "user" as const, content: text }];
+    setMessages(next);
+    setInput("");
+    setBusy(true);
+    setSteps([]);
+    try {
       const r = await fetch(`${API_BASE}/api/agent/chat`, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ messages: next, allowWeb:true, allowHttp:true })
-      })
-      const data = await r.json()
-      if (Array.isArray(data.steps) && data.steps.length) setSteps(prev => [...prev, ...data.steps])
-      const reply: Msg = data.reply || { role:'assistant', content:'Нет ответа' }
-      setMessages(prev => [...prev, reply])
-      queueMicrotask(()=> listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior:'smooth' }))
-    }catch(e:any){
-      setMessages(prev => [...prev, { role:'assistant', content:'Ошибка: '+(e.message || String(e)) }])
-    }finally{
-      setSending(false)
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: next, allowWeb: true, allowHttp: true }),
+      });
+      const j = await r.json();
+      if (j.reply) {
+        setMessages(m => [...m, j.reply]);
+      } else {
+        setMessages(m => [...m, { role: "assistant", content: "Не удалось получить ответ от модели." }]);
+      }
+      setSteps(Array.isArray(j.steps) ? j.steps : []);
+    } catch (e:any) {
+      setMessages(m => [...m, { role: "assistant", content: "Ошибка вызова backend: " + String(e?.message || e) }]);
+    } finally {
+      setBusy(false);
     }
-  }
+  };
 
-  const missingText = useMemo(()=> envSummary.missing.length ? `Не хватает: ${envSummary.missing.join(', ')}` : 'Готово', [envSummary])
+  const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  };
 
   return (
-    <div className="container" style={{maxWidth:980, margin:'0 auto', padding:16}}>
-      <div className="card">
-        <div style={{padding:12, borderBottom:'1px dashed #e2e2e6'}}>
-          <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', gap:8}}>
-            <div style={{fontSize:12, color:'#555'}}>ENV · {missingText} {envPath && <span style={{marginLeft:8, color:'#888'}}>Файл: {envPath}</span>}</div>
-            <div style={{display:'flex', gap:8}}>
-              <button className="btn" onClick={()=>{ loadEnvSummary(); loadEnvFile(); }}>Обновить</button>
-              <button className="btn" onClick={saveEnvFile} disabled={!envChanged}>Сохранить</button>
+    <div className="min-h-screen w-full bg-neutral-50 text-neutral-900 flex gap-4 p-4">
+      {/* Left: Chat */}
+      <div className="flex-1 flex flex-col bg-white border rounded-xl shadow-sm">
+        <header className="px-4 py-3 border-b font-medium">
+          API-eater — Chat (GPT-5, doc-first, auto-run)
+        </header>
+        <div className="flex-1 overflow-auto p-4 space-y-3">
+          {messages.map((m, i) => (
+            <div key={i} className={`p-3 rounded-lg border ${m.role === "user" ? "bg-blue-50 border-blue-200" : "bg-gray-50 border-gray-200"}`}>
+              <div className="text-xs mb-1 opacity-60">{m.role}</div>
+              <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
             </div>
-          </div>
-          {envError && <div style={{color:'#b00', fontSize:12, marginTop:6}}>Ошибка ENV: {envError}</div>}
-          <textarea
-            value={envText}
-            onChange={e=>{ setEnvText(e.target.value); setEnvChanged(true) }}
-            placeholder={`OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-5
-SERVICE_BASE_URL=https://example.com
-SERVICE_TOKEN=xxx`}
-            style={{width:'100%', minHeight:160, marginTop:8, fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize:13, padding:10, border:'1px solid #ddd', borderRadius:10}}
-          />
-          <div style={{fontSize:12, color:'#666', marginTop:6}}>
-            Подсказка: укажи *_BASE_URL и соответствующий *_TOKEN или *_API_KEY. По умолчанию модель — <b>gpt-5</b>. Текущий API_BASE: {API_BASE}
-          </div>
-        </div>
-
-        <div ref={listRef} className="chat" style={{minHeight:360,maxHeight:520,overflow:'auto', padding:12, display:'flex', flexDirection:'column', gap:8}}>
-          {messages.map((m,i)=>(
-            <div key={i} style={{
-              alignSelf: m.role==='user' ? 'flex-end' : 'flex-start',
-              background: m.role==='user' ? '#000' : '#f3f4f6',
-              color: m.role==='user' ? '#fff' : '#111',
-              borderRadius:12, padding:'10px 12px', maxWidth:'75%',
-              whiteSpace:'pre-wrap', wordBreak:'break-word'
-            }}>{m.content}</div>
           ))}
+          <div ref={endRef} />
         </div>
+        <div className="border-t p-3">
+          <textarea
+            className="w-full h-24 p-3 border rounded-lg outline-none focus:ring"
+            placeholder='Напишите запрос… (напр. "покажи поля в приложении operacii в разделе beton (ELMA365)")'
+            value={input}
+            onChange={(e)=>setInput(e.target.value)}
+            onKeyDown={onKey}
+          />
+          <div className="mt-2 flex gap-2">
+            <button
+              className={`px-4 py-2 rounded-lg text-white ${busy ? "bg-gray-400" : "bg-blue-600 hover:bg-blue-700"}`}
+              disabled={busy}
+              onClick={send}
+            >
+              {busy ? "Выполняю…" : "Отправить"}
+            </button>
+            <button
+              className="px-3 py-2 rounded-lg border hover:bg-gray-50"
+              onClick={()=>setSteps([])}
+            >
+              Очистить шаги
+            </button>
+          </div>
+        </div>
+      </div>
 
-        {steps.length>0 && (
-          <div style={{borderTop:'1px solid #efeff2', background:'#fafafa', borderRadius:'0 0 16px 16px', maxHeight:260, overflow:'auto', padding:10}}>
-            <div style={{fontWeight:600, marginBottom:8}}>Выполненные шаги</div>
-            <div style={{display:'grid', gap:8}}>
-              {steps.map((s,i)=>(
-                <div key={i} style={{fontSize:12, color:'#333', background:'#fff', border:'1px solid #eee', borderRadius:10, padding:8}}>
-                  <div><b>{s.tool}</b> {s.ok?'✓':'✗'}</div>
-                  {s.args && <div style={{color:'#666', fontSize:12, wordBreak:'break-all'}}>{JSON.stringify(s.args)}</div>}
-                  {s.result && <pre style={{whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:160,overflow:'auto'}}>{JSON.stringify(s.result,null,2)}</pre>}
-                  {s.error && <div style={{color:'#b00'}}>{s.error}</div>}
-                </div>
-              ))}
+      {/* Right: ENV + Steps */}
+      <div className="w-[420px] flex flex-col gap-4">
+        <div className="bg-white border rounded-xl shadow-sm">
+          <div className="px-4 py-3 border-b font-medium">.env (backend/.env)</div>
+          <div className="p-3">
+            <textarea
+              className="w-full h-64 p-3 border rounded-lg font-mono text-sm"
+              value={envText}
+              onChange={(e)=>setEnvText(e.target.value)}
+              placeholder="# Здесь будет реальное содержимое backend/.env"
+            />
+            <div className="mt-2 flex gap-2">
+              <button
+                className={`px-4 py-2 rounded-lg text-white ${envSaving ? "bg-gray-400" : "bg-emerald-600 hover:bg-emerald-700"}`}
+                onClick={saveEnv}
+                disabled={envSaving}
+              >
+                {envSaving ? "Сохраняю…" : "Сохранить"}
+              </button>
+              <button className="px-3 py-2 rounded-lg border hover:bg-gray-50" onClick={reloadEnv} disabled={envLoading}>
+                Обновить
+              </button>
+            </div>
+            <div className="text-xs opacity-60 mt-2">
+              Поддерживаются подсказки для доки/спеки:
+              <div className="font-mono">
+                SERVICE_OPENAPI_URL=<br/>
+                SERVICE_API_DOC_URL=
+              </div>
+              (например, ELMA365_OPENAPI_URL, ELMA365_API_DOC_URL)
             </div>
           </div>
-        )}
+        </div>
 
-        <div style={{padding:12, display:'flex', gap:8}}>
-          <input className="input" placeholder="Сообщение…" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send() } }} style={{flex:1}} />
-          <button className="btn primary" disabled={sending} onClick={send}>{sending?'...':'Отправить'}</button>
+        <div className="bg-white border rounded-xl shadow-sm">
+          <div className="px-4 py-3 border-b font-medium">Выполненные шаги</div>
+          <div className="p-3 space-y-2 max-h-[40vh] overflow-auto">
+            {steps.length === 0 && <div className="text-sm opacity-60">Пока пусто</div>}
+            {steps.map((s, i) => (
+              <div key={i} className="border rounded-lg p-2">
+                <div className="text-sm">
+                  <b>{s.tool}</b> {s.ok ? "— OK" : "— ошибка"}
+                </div>
+                {s.args && (
+                  <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto">{JSON.stringify(s.args, null, 2)}</pre>
+                )}
+                {s.error && (
+                  <div className="text-xs text-red-600">{s.error}</div>
+                )}
+                {s.result && (
+                  <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto">{JSON.stringify(s.result, null, 2)}</pre>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>
-  )
+  );
 }
