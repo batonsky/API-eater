@@ -6,7 +6,7 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   git add -A
   git commit -m "chore: update app (connections, prompt, runner)"
 fi
-git push origin main
+GIT_SSH_COMMAND="ssh -i ./.ssh_api_eater/id_ed25519 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=.ssh_api_eater/known_hosts" git push origin main
 
 # Local → Server sync via rsync (preserve server .env and node_modules)
 RSYNC_SSH="ssh -p 404 -i ./.ssh_api_eater/id_ed25519 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=.ssh_api_eater/known_hosts"
@@ -34,4 +34,3 @@ REMOTE_CMDS='
 ssh -p 404 -i ./.ssh_api_eater/id_ed25519 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=.ssh_api_eater/known_hosts batonsky@91.199.160.228 "$REMOTE_CMDS"
 
 echo "Deployed to server and pushed to GitHub."
-
