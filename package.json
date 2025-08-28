@@ -11,7 +11,7 @@
     "deploy": "bash tools/deploy.sh"
   },
   "devDependencies": {
-    "concurrently": "^9.0.1"
+    "concurrently": "^9.0.1",
+    "pm2": "^5.4.2"
   }
 }
-
