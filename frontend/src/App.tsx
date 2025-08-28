@@ -35,6 +35,21 @@ export default function App() {
   type Conn = { id: string; name: string; baseUrl: string; token: string; openapiUrl?: string; apiDocUrl?: string };
   const [connections, setConnections] = useState<Conn[]>([]);
   const [connForm, setConnForm] = useState<{ id: string; name: string; baseUrl: string; token: string; openapiUrl: string; apiDocUrl: string }>({ id: "", name: "", baseUrl: "", token: "", openapiUrl: "", apiDocUrl: "" });
+  const normalizeId = (s: string) => (s || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const deriveId = () => {
+    const n1 = normalizeId(connForm.id);
+    if (n1) return n1;
+    const n2 = normalizeId(connForm.name);
+    if (n2) return n2;
+    try {
+      if (connForm.baseUrl) {
+        const h = new URL(connForm.baseUrl).hostname.split(".")[0];
+        const n3 = normalizeId(h);
+        if (n3) return n3;
+      }
+    } catch {}
+    return "SERVICE_" + Math.random().toString(36).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+  };
 
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -60,8 +75,8 @@ export default function App() {
     try {
       setConnSaving(true);
       setConnNotice("");
-      const body = { ...connForm };
-      if (!body.id && body.name) body.id = body.name;
+      const id = deriveId();
+      const body = { ...connForm, id, name: connForm.name || id };
       const url = `${API_BASE}/api/connections`;
       const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (!r.ok) {
@@ -188,11 +203,14 @@ export default function App() {
               <div className="row">
                 <div style={{ flex: 1 }}>
                   <div className="small">ID (A‑Z, 0‑9, _)</div>
-                  <input className="input" placeholder="CRM" value={connForm.id} onChange={(e) => setConnForm({ ...connForm, id: e.target.value })} />
+                  <input className="input" placeholder="CRM (латиница/цифры/_)" value={connForm.id} onChange={(e) => setConnForm({ ...connForm, id: e.target.value })} />
                 </div>
                 <div style={{ flex: 1 }}>
                   <div className="small">Название</div>
-                  <input className="input" placeholder="Любое" value={connForm.name} onChange={(e) => setConnForm({ ...connForm, name: e.target.value })} />
+                  <input className="input" placeholder="Любое" value={connForm.name} onChange={(e) => {
+                    const name = e.target.value;
+                    setConnForm((prev) => ({ ...prev, name, id: prev.id ? prev.id : normalizeId(name) }));
+                  }} />
                 </div>
               </div>
             </div>
