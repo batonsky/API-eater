@@ -80,7 +80,6 @@ export default function App() {
   const deleteConn = async (id: string) => {
     await fetch(`${API_BASE}/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
     reloadConns();
-    reloadEnv();
   };
   useEffect(() => {
     reloadConns();
