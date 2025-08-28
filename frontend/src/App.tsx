@@ -1,35 +1,51 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
-type Msg = { role: "user" | "assistant" | "system"; content: string };
-type Step =
-  | { tool: string; ok: boolean; args?: any; result?: any; error?: string };
+type Msg = { role: "user" | "assistant" | "system"; content: string; kind?: "reply" | "action" | "status" };
+type Step = { tool: string; ok: boolean; args?: any; result?: any; error?: string };
 
-const API_BASE =(import.meta as any).env.VITE_API_BASE || (typeof window !== "undefined" ? window.location.origin.replace(/:\d+$/, ":4001"): "http://localhost:4001");
+const API_BASE = (import.meta as any).env.VITE_API_BASE || (typeof window !== "undefined" ? window.location.origin.replace(/:\\d+$/, ":4001") : "http://localhost:4001");
+
+function iconForTool(t: string) {
+  if (t === "env.list") return "🧩";
+  if (t === "spec.hints") return "🧭";
+  if (t === "web.search") return "🔎";
+  if (t === "openapi.probe") return "🧪";
+  if (t === "openapi.load") return "📥";
+  if (t === "http") return "🔗";
+  if (t.startsWith("script.save")) return "💾";
+  if (t.startsWith("script.run")) return "▶️";
+  return "•";
+}
 
 export default function App() {
-  const [envText, setEnvText] = useState<string>("");
-  const [envLoading, setEnvLoading] = useState<boolean>(false);
-  const [envSaving, setEnvSaving] = useState<boolean>(false);
+  const [envText, setEnvText] = useState("");
+  const [envLoading, setEnvLoading] = useState(false);
+  const [envSaving, setEnvSaving] = useState(false);
 
-  const [input, setInput] = useState<string>("");
+  const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Msg[]>([
-    { role: "assistant", content:
-`Привет! Я универсальный агент по API (модель: gpt-5).
-Опиши задачу: что и в какой системе нужно прочитать/изменить.
-Я найду спецификацию/документацию, соберу корректный запрос и выполню его.
-Ключи и базовые URL хранятся отдельно и не попадают в код запросов.` }
+    {
+      role: "assistant",
+      kind: "reply",
+      content:
+        "Привет! Я универсальный агент по API (gpt‑5). Опишите задачу — я найду спецификацию/доки, сформирую и выполню корректный запрос. Ключи и базовые URL хранятся отдельно и в скрипты не попадают.",
+    },
   ]);
   const [steps, setSteps] = useState<Step[]>([]);
-  const [busy, setBusy] = useState<boolean>(false);
+  const [busy, setBusy] = useState(false);
+  const thinkingIndexRef = useRef<number | null>(null);
+
   // Connections
-  type Conn = { id:string; name:string; baseUrl:string; token:string; openapiUrl?:string; apiDocUrl?:string };
+  type Conn = { id: string; name: string; baseUrl: string; token: string; openapiUrl?: string; apiDocUrl?: string };
   const [connections, setConnections] = useState<Conn[]>([]);
-  const [connForm, setConnForm] = useState<{id:string; name:string; baseUrl:string; token:string; openapiUrl:string; apiDocUrl:string}>({id:"", name:"", baseUrl:"", token:"", openapiUrl:"", apiDocUrl:""});
+  const [connForm, setConnForm] = useState<{ id: string; name: string; baseUrl: string; token: string; openapiUrl: string; apiDocUrl: string }>({ id: "", name: "", baseUrl: "", token: "", openapiUrl: "", apiDocUrl: "" });
 
   const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, steps]);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, steps]);
 
-  // --- ENV load/save ---
+  // ENV load/save
   const reloadEnv = async () => {
     setEnvLoading(true);
     try {
@@ -54,9 +70,11 @@ export default function App() {
       setEnvSaving(false);
     }
   };
-  useEffect(() => { reloadEnv(); }, []);
+  useEffect(() => {
+    reloadEnv();
+  }, []);
 
-  // --- Connections load/save ---
+  // Connections load/save
   const reloadConns = async () => {
     try {
       const r = await fetch(`${API_BASE}/api/connections`);
@@ -67,27 +85,28 @@ export default function App() {
   const saveConn = async () => {
     const body = { ...connForm };
     if (!body.id && body.name) body.id = body.name;
-    await fetch(`${API_BASE}/api/connections`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    setConnForm({id:"", name:"", baseUrl:"", token:"", openapiUrl:"", apiDocUrl:""});
+    await fetch(`${API_BASE}/api/connections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    setConnForm({ id: "", name: "", baseUrl: "", token: "", openapiUrl: "", apiDocUrl: "" });
     reloadConns();
     reloadEnv();
   };
-  const deleteConn = async (id:string) => {
+  const deleteConn = async (id: string) => {
     await fetch(`${API_BASE}/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
     reloadConns();
     reloadEnv();
   };
-  useEffect(() => { reloadConns(); }, []);
+  useEffect(() => {
+    reloadConns();
+  }, []);
 
-  // --- Chat call ---
+  // Chat call
   const send = async () => {
     const text = input.trim();
     if (!text || busy) return;
-    const next = [...messages, { role: "user" as const, content: text }];
+    const mUser: Msg = { role: "user", content: text };
+    const mThinking: Msg = { role: "assistant", kind: "status", content: "⏳ Выполняю задачу… ищу спецификацию и готовлю запрос" };
+    const next = [...messages, mUser, mThinking];
+    thinkingIndexRef.current = next.length - 1;
     setMessages(next);
     setInput("");
     setBusy(true);
@@ -96,172 +115,163 @@ export default function App() {
       const r = await fetch(`${API_BASE}/api/agent/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: next, allowWeb: true, allowHttp: true }),
+        body: JSON.stringify({ messages: [...messages, mUser], allowWeb: true, allowHttp: true }),
       });
       const j = await r.json();
-      if (j.reply) {
-        setMessages(m => [...m, j.reply]);
-      } else {
-        setMessages(m => [...m, { role: "assistant", content: "Не удалось получить ответ от модели." }]);
-      }
+      const actionMsgs: Msg[] = Array.isArray(j.steps)
+        ? (j.steps as Step[]).map((s: Step) => ({
+            role: "assistant",
+            kind: "action",
+            content: `${iconForTool(s.tool)} ${s.tool}${s.ok ? " — OK" : " — ошибка"}${s.result?.status ? ` (status ${s.result.status})` : ""}`,
+          }))
+        : [];
+      const finalMsg: Msg = j.reply ? j.reply : { role: "assistant", kind: "reply", content: "Не удалось получить ответ от модели." };
       setSteps(Array.isArray(j.steps) ? j.steps : []);
-    } catch (e:any) {
-      setMessages(m => [...m, { role: "assistant", content: "Ошибка вызова backend: " + String(e?.message || e) }]);
+
+      setMessages((m) => {
+        const idx = thinkingIndexRef.current;
+        if (idx != null && idx >= 0 && idx < m.length) {
+          const clone = m.slice();
+          clone.splice(idx, 1, ...actionMsgs, finalMsg);
+          thinkingIndexRef.current = null;
+          return clone;
+        }
+        return [...m, ...actionMsgs, finalMsg];
+      });
+    } catch (e: any) {
+      setMessages((m) => [
+        ...m.slice(0, thinkingIndexRef.current == null ? m.length : thinkingIndexRef.current),
+        { role: "assistant", kind: "reply", content: "Ошибка вызова backend: " + String(e?.message || e) },
+      ]);
     } finally {
       setBusy(false);
     }
   };
 
-  const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
   };
 
   return (
-    <div className="min-h-screen w-full bg-neutral-50 text-neutral-900 flex gap-4 p-4">
-      {/* Left: Chat */}
-      <div className="flex-1 flex flex-col bg-white border rounded-xl shadow-sm">
-        <header className="px-4 py-3 border-b font-medium">
-          API-eater — Chat (GPT-5, doc-first, auto-run)
-        </header>
-        <div className="flex-1 overflow-auto p-4 space-y-3">
-          {messages.map((m, i) => (
-            <div key={i} className={`p-3 rounded-lg border ${m.role === "user" ? "bg-blue-50 border-blue-200" : "bg-gray-50 border-gray-200"}`}>
-              <div className="text-xs mb-1 opacity-60">{m.role}</div>
-              <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
-            </div>
-          ))}
-          <div ref={endRef} />
-        </div>
-        <div className="border-t p-3">
-          <textarea
-            className="w-full h-24 p-3 border rounded-lg outline-none focus:ring"
-            placeholder='Напишите запрос… (напр. "покажи поля в приложении operacii в разделе beton (ELMA365)")'
-            value={input}
-            onChange={(e)=>setInput(e.target.value)}
-            onKeyDown={onKey}
-          />
-          <div className="mt-2 flex gap-2">
-            <button
-              className={`px-4 py-2 rounded-lg text-white ${busy ? "bg-gray-400" : "bg-blue-600 hover:bg-blue-700"}`}
-              disabled={busy}
-              onClick={send}
-            >
+    <div className="container">
+      <div className="twoCols">
+        {/* Chat */}
+        <div className="card" style={{ display: "flex", flexDirection: "column", minHeight: "70vh" }}>
+          <div className="header">API‑eater — Chat (GPT‑5, doc‑first, auto‑run)</div>
+          <div className="chat" style={{ flex: 1, overflow: "auto" }}>
+            {messages.map((m, i) => (
+              <div key={i} className={`bubble ${m.role === "user" ? "user" : "assistant"}`}>
+                <div className="role">
+                  <div className="avatar">{m.role === "user" ? "U" : "A"}</div>
+                  <div className="small">{m.role}</div>
+                </div>
+                <div>{m.content}</div>
+              </div>
+            ))}
+            <div ref={endRef} />
+          </div>
+          <div className="composer">
+            <input
+              className="input"
+              placeholder='Опишите задачу… (например: "найди OpenAPI и получи список клиентов")'
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onKey}
+            />
+            <button className="btn primary" disabled={busy} onClick={send}>
               {busy ? "Выполняю…" : "Отправить"}
-            </button>
-            <button
-              className="px-3 py-2 rounded-lg border hover:bg-gray-50"
-              onClick={()=>setSteps([])}
-            >
-              Очистить шаги
             </button>
           </div>
         </div>
-      </div>
 
-      {/* Right: ENV + Steps */}
-      <div className="w-[450px] flex flex-col gap-4">
-        <div className="bg-white border rounded-xl shadow-sm">
-          <div className="px-4 py-3 border-b font-medium">Подключения к API (секреты отдельно)</div>
-          <div className="p-3 space-y-3">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <div className="text-xs mb-1">ID (A-Z, 0-9, _)</div>
-                <input className="w-full p-2 border rounded" placeholder="CRM" value={connForm.id} onChange={e=>setConnForm({...connForm, id:e.target.value})} />
-              </div>
-              <div>
-                <div className="text-xs mb-1">Название</div>
-                <input className="w-full p-2 border rounded" placeholder="Любое" value={connForm.name} onChange={e=>setConnForm({...connForm, name:e.target.value})} />
-              </div>
-              <div className="col-span-2">
-                <div className="text-xs mb-1">Базовый URL</div>
-                <input className="w-full p-2 border rounded" placeholder="https://api.example.com" value={connForm.baseUrl} onChange={e=>setConnForm({...connForm, baseUrl:e.target.value})} />
-              </div>
-              <div className="col-span-2">
-                <div className="text-xs mb-1">Токен/ключ (не показывается полностью)</div>
-                <input className="w-full p-2 border rounded" placeholder="скопируйте сюда" value={connForm.token} onChange={e=>setConnForm({...connForm, token:e.target.value})} />
-              </div>
-              <div>
-                <div className="text-xs mb-1">OpenAPI URL (опц.)</div>
-                <input className="w-full p-2 border rounded" placeholder="https://.../openapi.json" value={connForm.openapiUrl} onChange={e=>setConnForm({...connForm, openapiUrl:e.target.value})} />
-              </div>
-              <div>
-                <div className="text-xs mb-1">Docs URL (опц.)</div>
-                <input className="w-full p-2 border rounded" placeholder="https://.../docs" value={connForm.apiDocUrl} onChange={e=>setConnForm({...connForm, apiDocUrl:e.target.value})} />
+        {/* Sidebar */}
+        <div className="list">
+          <div className="card">
+            <div className="header">Подключения к API (секреты отдельно)</div>
+            <div className="section">
+              <div className="row">
+                <div style={{ flex: 1 }}>
+                  <div className="small">ID (A‑Z, 0‑9, _)</div>
+                  <input className="input" placeholder="CRM" value={connForm.id} onChange={(e) => setConnForm({ ...connForm, id: e.target.value })} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div className="small">Название</div>
+                  <input className="input" placeholder="Любое" value={connForm.name} onChange={(e) => setConnForm({ ...connForm, name: e.target.value })} />
+                </div>
               </div>
             </div>
-            <div className="flex gap-2">
-              <button className="px-4 py-2 rounded-lg text-white bg-emerald-600 hover:bg-emerald-700" onClick={saveConn}>Сохранить подключение</button>
-              <button className="px-3 py-2 rounded-lg border hover:bg-gray-50" onClick={reloadConns}>Обновить</button>
+            <div className="section">
+              <div className="small">Базовый URL</div>
+              <input className="input" placeholder="https://api.example.com" value={connForm.baseUrl} onChange={(e) => setConnForm({ ...connForm, baseUrl: e.target.value })} />
             </div>
-            <div className="text-xs opacity-70">После сохранения переменные станут доступны как: ID_BASE_URL, ID_TOKEN, ID_OPENAPI_URL, ID_API_DOC_URL.</div>
-            <div className="border-t pt-2">
-              <div className="text-sm font-medium mb-2">Текущие подключения</div>
-              <div className="space-y-2 max-h-[24vh] overflow-auto">
-                {connections.length===0 && <div className="text-sm opacity-60">Пусто</div>}
+            <div className="section">
+              <div className="small">Токен/ключ (не показывается полностью)</div>
+              <input className="input" placeholder="скопируйте сюда" value={connForm.token} onChange={(e) => setConnForm({ ...connForm, token: e.target.value })} />
+            </div>
+            <div className="section">
+              <div className="row">
+                <div style={{ flex: 1 }}>
+                  <div className="small">OpenAPI URL (опц.)</div>
+                  <input className="input" placeholder="https://.../openapi.json" value={connForm.openapiUrl} onChange={(e) => setConnForm({ ...connForm, openapiUrl: e.target.value })} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div className="small">Docs URL (опц.)</div>
+                  <input className="input" placeholder="https://.../docs" value={connForm.apiDocUrl} onChange={(e) => setConnForm({ ...connForm, apiDocUrl: e.target.value })} />
+                </div>
+              </div>
+            </div>
+            <div className="section">
+              <div className="row">
+                <button className="btn primary" onClick={saveConn}>Сохранить подключение</button>
+                <button className="btn" onClick={reloadConns}>Обновить</button>
+              </div>
+              <div className="small" style={{ marginTop: 8 }}>
+                После сохранения переменные доступны как: <span className="mono">ID_BASE_URL</span>, <span className="mono">ID_TOKEN</span>, <span className="mono">ID_OPENAPI_URL</span>, <span className="mono">ID_API_DOC_URL</span>.
+              </div>
+            </div>
+            <div className="section">
+              <div className="small" style={{ fontWeight: 600, marginBottom: 6 }}>Текущие подключения</div>
+              <div className="list" style={{ maxHeight: 240, overflow: "auto" }}>
+                {connections.length === 0 && <div className="small">Пусто</div>}
                 {connections.map((c) => (
-                  <div key={c.id} className="border rounded p-2">
-                    <div className="text-sm"><b>{c.name}</b> <span className="opacity-60">({c.id})</span></div>
-                    <div className="text-xs">BASE: {c.baseUrl||'-'}</div>
-                    <div className="text-xs">TOKEN: {c.token||'-'}</div>
-                    {c.openapiUrl && <div className="text-xs">OpenAPI: {c.openapiUrl}</div>}
-                    {c.apiDocUrl && <div className="text-xs">Docs: {c.apiDocUrl}</div>}
-                    <div className="mt-1"><button className="text-xs text-red-600" onClick={()=>deleteConn(c.id)}>Удалить</button></div>
+                  <div key={c.id} className="card" style={{ borderRadius: 12 }}>
+                    <div className="section" style={{ borderBottom: "none" }}>
+                      <div className="small"><b>{c.name}</b> <span style={{ opacity: 0.6 }}>({c.id})</span></div>
+                      <div className="small">BASE: {c.baseUrl || "-"}</div>
+                      <div className="small">TOKEN: {c.token || "-"}</div>
+                      {c.openapiUrl && <div className="small">OpenAPI: {c.openapiUrl}</div>}
+                      {c.apiDocUrl && <div className="small">Docs: {c.apiDocUrl}</div>}
+                      <div className="row" style={{ marginTop: 6 }}>
+                        <button className="btn" onClick={() => deleteConn(c.id)}>Удалить</button>
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
           </div>
-        </div>
-        <div className="bg-white border rounded-xl shadow-sm">
-          <div className="px-4 py-3 border-b font-medium">.env (backend/.env)</div>
-          <div className="p-3">
-            <textarea
-              className="w-full h-64 p-3 border rounded-lg font-mono text-sm"
-              value={envText}
-              onChange={(e)=>setEnvText(e.target.value)}
-              placeholder="# Здесь будет реальное содержимое backend/.env"
-            />
-            <div className="mt-2 flex gap-2">
-              <button
-                className={`px-4 py-2 rounded-lg text-white ${envSaving ? "bg-gray-400" : "bg-emerald-600 hover:bg-emerald-700"}`}
-                onClick={saveEnv}
-                disabled={envSaving}
-              >
-                {envSaving ? "Сохраняю…" : "Сохранить"}
-              </button>
-              <button className="px-3 py-2 rounded-lg border hover:bg-gray-50" onClick={reloadEnv} disabled={envLoading}>
-                Обновить
-              </button>
-            </div>
-            <div className="text-xs opacity-60 mt-2">
-              В .env храните только ключи модели и провайдеров поиска (OPENAI_API_KEY, OPENAI_MODEL, BING_SEARCH_API_KEY, SERPAPI_API_KEY, GOOGLE_API_KEY, GOOGLE_CSE_ID, BRAVE_SEARCH_API_KEY).
-            </div>
-          </div>
-        </div>
 
-        <div className="bg-white border rounded-xl shadow-sm">
-          <div className="px-4 py-3 border-b font-medium">Выполненные шаги</div>
-          <div className="p-3 space-y-2 max-h-[40vh] overflow-auto">
-            {steps.length === 0 && <div className="text-sm opacity-60">Пока пусто</div>}
-            {steps.map((s, i) => (
-              <div key={i} className="border rounded-lg p-2">
-                <div className="text-sm">
-                  <b>{s.tool}</b> {s.ok ? "— OK" : "— ошибка"}
-                </div>
-                {s.args && (
-                  <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto">{JSON.stringify(s.args, null, 2)}</pre>
-                )}
-                {s.error && (
-                  <div className="text-xs text-red-600">{s.error}</div>
-                )}
-                {s.result && (
-                  <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto">{JSON.stringify(s.result, null, 2)}</pre>
-                )}
+          <div className="card">
+            <div className="header">.env (backend/.env)</div>
+            <div className="section">
+              <textarea className="textarea" value={envText} onChange={(e) => setEnvText(e.target.value)} placeholder="# Здесь будет реальное содержимое backend/.env" />
+            </div>
+            <div className="section">
+              <div className="row">
+                <button className="btn primary" onClick={saveEnv} disabled={envSaving}>{envSaving ? "Сохраняю…" : "Сохранить"}</button>
+                <button className="btn" onClick={reloadEnv} disabled={envLoading}>Обновить</button>
               </div>
-            ))}
+              <div className="small" style={{ marginTop: 8 }}>
+                В .env храните ключи модели и провайдеров поиска: <span className="mono">OPENAI_API_KEY</span>, <span className="mono">OPENAI_MODEL</span>, <span className="mono">BING_SEARCH_API_KEY</span>, <span className="mono">SERPAPI_API_KEY</span>, <span className="mono">GOOGLE_API_KEY</span>, <span className="mono">GOOGLE_CSE_ID</span>, <span className="mono">BRAVE_SEARCH_API_KEY</span>.
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
   );
 }
+
