@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 type Msg = { role: "user" | "assistant" | "system"; content: string; kind?: "reply" | "action" | "status" };
 type Step = { tool: string; ok: boolean; args?: any; result?: any; error?: string };
 
-const API_BASE = (import.meta as any).env.VITE_API_BASE || (typeof window !== "undefined" ? window.location.origin.replace(/:\\d+$/, ":4001") : "http://localhost:4001");
+const API_BASE = (import.meta as any).env.VITE_API_BASE || (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:4001` : "http://localhost:4001");
 
 function iconForTool(t: string) {
   if (t === "env.list") return "🧩";
@@ -62,10 +62,11 @@ export default function App() {
       setConnNotice("");
       const body = { ...connForm };
       if (!body.id && body.name) body.id = body.name;
-      const r = await fetch(`${API_BASE}/api/connections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const url = `${API_BASE}/api/connections`;
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (!r.ok) {
         const msg = await r.text();
-        throw new Error(`Не удалось сохранить (${r.status}): ${msg}`);
+        throw new Error(`Не удалось сохранить подключение (${r.status}). URL: ${url}. Ответ: ${msg.slice(0,120)}`);
       }
       setConnForm({ id: "", name: "", baseUrl: "", token: "", openapiUrl: "", apiDocUrl: "" });
       setConnNotice("Сохранено");
@@ -98,7 +99,8 @@ export default function App() {
     setBusy(true);
     setSteps([]);
     try {
-      const r = await fetch(`${API_BASE}/api/agent/chat`, {
+      const chatUrl = `${API_BASE}/api/agent/chat`;
+      const r = await fetch(chatUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: [...messages, mUser], allowWeb: true, allowHttp: true }),
@@ -108,7 +110,7 @@ export default function App() {
       try { j = text ? JSON.parse(text) : null; } catch {}
       if (!r.ok) {
         const body = text?.slice(0, 200) || '';
-        throw new Error(`HTTP ${r.status} ${r.statusText || ''} ${body}`.trim());
+        throw new Error(`HTTP ${r.status} ${r.statusText || ''}; URL: ${chatUrl}; ${body}`.trim());
       }
       const stepsArr: Step[] = Array.isArray(j?.steps) ? (j.steps as Step[]) : [];
       const actionMsgs: Msg[] = stepsArr.map((s: Step) => ({
