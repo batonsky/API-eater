@@ -1,0 +1,17 @@
+{
+  "name": "api-eater",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "backend": "npm --prefix backend run start",
+    "frontend": "npm --prefix frontend run dev",
+    "dev": "concurrently -k -n backend,frontend -c blue,magenta \"npm:backend\" \"npm:frontend\"",
+    "build": "npm --prefix frontend run build",
+    "preview": "npm --prefix frontend run preview",
+    "deploy": "bash tools/deploy.sh"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}
+

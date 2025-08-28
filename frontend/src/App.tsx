@@ -15,11 +15,16 @@ export default function App() {
   const [messages, setMessages] = useState<Msg[]>([
     { role: "assistant", content:
 `Привет! Я универсальный агент по API (модель: gpt-5).
-Напиши задачу (например: «создай элемент в приложении operacii в разделе beton (ELMA365)»).
-Я посмотрю .env, прочту OpenAPI/Docs (если указаны), соберу и выполню запрос и дам лог шагов.` }
+Опиши задачу: что и в какой системе нужно прочитать/изменить.
+Я найду спецификацию/документацию, соберу корректный запрос и выполню его.
+Ключи и базовые URL хранятся отдельно и не попадают в код запросов.` }
   ]);
   const [steps, setSteps] = useState<Step[]>([]);
   const [busy, setBusy] = useState<boolean>(false);
+  // Connections
+  type Conn = { id:string; name:string; baseUrl:string; token:string; openapiUrl?:string; apiDocUrl?:string };
+  const [connections, setConnections] = useState<Conn[]>([]);
+  const [connForm, setConnForm] = useState<{id:string; name:string; baseUrl:string; token:string; openapiUrl:string; apiDocUrl:string}>({id:"", name:"", baseUrl:"", token:"", openapiUrl:"", apiDocUrl:""});
 
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, steps]);
@@ -50,6 +55,33 @@ export default function App() {
     }
   };
   useEffect(() => { reloadEnv(); }, []);
+
+  // --- Connections load/save ---
+  const reloadConns = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/connections`);
+      const j = await r.json();
+      setConnections(j.connections || []);
+    } catch {}
+  };
+  const saveConn = async () => {
+    const body = { ...connForm };
+    if (!body.id && body.name) body.id = body.name;
+    await fetch(`${API_BASE}/api/connections`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    setConnForm({id:"", name:"", baseUrl:"", token:"", openapiUrl:"", apiDocUrl:""});
+    reloadConns();
+    reloadEnv();
+  };
+  const deleteConn = async (id:string) => {
+    await fetch(`${API_BASE}/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
+    reloadConns();
+    reloadEnv();
+  };
+  useEffect(() => { reloadConns(); }, []);
 
   // --- Chat call ---
   const send = async () => {
@@ -127,7 +159,59 @@ export default function App() {
       </div>
 
       {/* Right: ENV + Steps */}
-      <div className="w-[420px] flex flex-col gap-4">
+      <div className="w-[450px] flex flex-col gap-4">
+        <div className="bg-white border rounded-xl shadow-sm">
+          <div className="px-4 py-3 border-b font-medium">Подключения к API (секреты отдельно)</div>
+          <div className="p-3 space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="text-xs mb-1">ID (A-Z, 0-9, _)</div>
+                <input className="w-full p-2 border rounded" placeholder="CRM" value={connForm.id} onChange={e=>setConnForm({...connForm, id:e.target.value})} />
+              </div>
+              <div>
+                <div className="text-xs mb-1">Название</div>
+                <input className="w-full p-2 border rounded" placeholder="Любое" value={connForm.name} onChange={e=>setConnForm({...connForm, name:e.target.value})} />
+              </div>
+              <div className="col-span-2">
+                <div className="text-xs mb-1">Базовый URL</div>
+                <input className="w-full p-2 border rounded" placeholder="https://api.example.com" value={connForm.baseUrl} onChange={e=>setConnForm({...connForm, baseUrl:e.target.value})} />
+              </div>
+              <div className="col-span-2">
+                <div className="text-xs mb-1">Токен/ключ (не показывается полностью)</div>
+                <input className="w-full p-2 border rounded" placeholder="скопируйте сюда" value={connForm.token} onChange={e=>setConnForm({...connForm, token:e.target.value})} />
+              </div>
+              <div>
+                <div className="text-xs mb-1">OpenAPI URL (опц.)</div>
+                <input className="w-full p-2 border rounded" placeholder="https://.../openapi.json" value={connForm.openapiUrl} onChange={e=>setConnForm({...connForm, openapiUrl:e.target.value})} />
+              </div>
+              <div>
+                <div className="text-xs mb-1">Docs URL (опц.)</div>
+                <input className="w-full p-2 border rounded" placeholder="https://.../docs" value={connForm.apiDocUrl} onChange={e=>setConnForm({...connForm, apiDocUrl:e.target.value})} />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button className="px-4 py-2 rounded-lg text-white bg-emerald-600 hover:bg-emerald-700" onClick={saveConn}>Сохранить подключение</button>
+              <button className="px-3 py-2 rounded-lg border hover:bg-gray-50" onClick={reloadConns}>Обновить</button>
+            </div>
+            <div className="text-xs opacity-70">После сохранения переменные станут доступны как: ID_BASE_URL, ID_TOKEN, ID_OPENAPI_URL, ID_API_DOC_URL.</div>
+            <div className="border-t pt-2">
+              <div className="text-sm font-medium mb-2">Текущие подключения</div>
+              <div className="space-y-2 max-h-[24vh] overflow-auto">
+                {connections.length===0 && <div className="text-sm opacity-60">Пусто</div>}
+                {connections.map((c) => (
+                  <div key={c.id} className="border rounded p-2">
+                    <div className="text-sm"><b>{c.name}</b> <span className="opacity-60">({c.id})</span></div>
+                    <div className="text-xs">BASE: {c.baseUrl||'-'}</div>
+                    <div className="text-xs">TOKEN: {c.token||'-'}</div>
+                    {c.openapiUrl && <div className="text-xs">OpenAPI: {c.openapiUrl}</div>}
+                    {c.apiDocUrl && <div className="text-xs">Docs: {c.apiDocUrl}</div>}
+                    <div className="mt-1"><button className="text-xs text-red-600" onClick={()=>deleteConn(c.id)}>Удалить</button></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
         <div className="bg-white border rounded-xl shadow-sm">
           <div className="px-4 py-3 border-b font-medium">.env (backend/.env)</div>
           <div className="p-3">
@@ -150,12 +234,7 @@ export default function App() {
               </button>
             </div>
             <div className="text-xs opacity-60 mt-2">
-              Поддерживаются подсказки для доки/спеки:
-              <div className="font-mono">
-                SERVICE_OPENAPI_URL=<br/>
-                SERVICE_API_DOC_URL=
-              </div>
-              (например, ELMA365_OPENAPI_URL, ELMA365_API_DOC_URL)
+              В .env храните только ключи модели и провайдеров поиска (OPENAI_API_KEY, OPENAI_MODEL, BING_SEARCH_API_KEY, SERPAPI_API_KEY, GOOGLE_API_KEY, GOOGLE_CSE_ID, BRAVE_SEARCH_API_KEY).
             </div>
           </div>
         </div>

@@ -25,6 +25,7 @@ app.use(express.json({ limit: "4mb" }));
 const DATA_DIR = path.resolve(__dirname, "data");
 const ENV_FILE = path.join(__dirname, ".env");
 const JSON_ENV_FILE = path.join(DATA_DIR, "env.json");
+const CONN_FILE = path.join(DATA_DIR, "connections.json");
 const SCRIPTS_FILE = path.join(DATA_DIR, "scripts.json");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -39,10 +40,20 @@ function readDotenvFile() {
   try { const txt = fs.readFileSync(ENV_FILE, "utf8"); const parsed = dotenv.parse(txt); return { txt, parsed }; }
   catch { return { txt: "", parsed: {} }; }
 }
+function normalizeId(id){ return String(id||"").trim().toUpperCase().replace(/[^A-Z0-9]+/g,'_').replace(/^_+|_+$/g,''); }
 function mergeEnv() {
   const { parsed } = readDotenvFile();
   const jsonEnv = readJsonSafe(JSON_ENV_FILE, {});
-  return { ...process.env, ...jsonEnv, ...parsed };
+  const conns = readJsonSafe(CONN_FILE, { connections: [] });
+  const connEnv = {};
+  for (const c of conns.connections || []) {
+    const ID = normalizeId(c.id || c.name || ""); if (!ID) continue;
+    if (c.baseUrl) connEnv[ID+"_BASE_URL"] = c.baseUrl;
+    if (c.token) connEnv[ID+"_TOKEN"] = c.token;
+    if (c.openapiUrl) connEnv[ID+"_OPENAPI_URL"] = c.openapiUrl;
+    if (c.apiDocUrl) connEnv[ID+"_API_DOC_URL"] = c.apiDocUrl;
+  }
+  return { ...process.env, ...jsonEnv, ...connEnv, ...parsed };
 }
 function mask(v){ if(!v) return ""; const s=String(v); return s.length<=6?"****":s.slice(0,3)+"…"+s.slice(-3); }
 function publicEnvView(){
@@ -242,12 +253,27 @@ function extractToolCall(text){
 }
 
 /* ---------- SYSTEM PROMPT ---------- */
-const SYSTEM_PROMPT =
-"Ты — агент по внешним API. Действуй решительно.\n" +
-"Порядок: spec.hints → openapi.load (если есть) → чтение API Docs (GET к *_API_DOC_URL) → если нет подсказок, web.search и openapi.probe. Не выдумывай эндпоинты.\n" +
-"Если в env заданы *_BASE_URL и *_TOKEN — используй их, не спрашивай повторно. Для ELMA365 по умолчанию: beton — space/секция, operacii — код приложения (уточняй только при 404/405).\n" +
-"Готовый запрос сохраняй (script.save) — сервер выполнит его автоматически. Один инструмент на шаг.\n" +
-"В конце ответа всегда дай краткий лог шагов (не мысли): что посмотрел (OpenAPI/Docs), какой запрос запустил, результат (статус/краткая выжимка), были ли исправления.";
+const SYSTEM_PROMPT = [
+  "Ты — универсальный агент по интеграциям с внешними API.",
+  "Твоя задача: по пользовательскому запросу найти описания API (OpenAPI/Swagger и страницы документации), понять требуемую операцию и корректно выполнить её через HTTP.",
+  "ПРИНЦИПЫ:",
+  "- Никаких предположений об эндпоинтах. Используй спецификацию и/или официальную документацию.",
+  "- Сначала используй подсказки из окружения (*_OPENAPI_URL, *_API_DOC_URL). Затем openapi.load → чтение страниц Docs (http GET к *_API_DOC_URL). Если нет подсказок — web.search и openapi.probe.",
+  "- Ключи/базовые URL не вшивай в скрипты: они берутся из окружения (*_BASE_URL, *_TOKEN). Если чего-то не хватает — запроси у пользователя отдельно (полями интерфейса).",
+  "- Проверяй URL на публичность (только http/https, не внутренние IP/домены).",
+  "- Выполняй работу итеративно: если ответ об ошибке — проанализируй и исправь запрос (параметры, метод, заголовки, путь).",
+  "- Будь конкретен: указывай метод, путь, параметры, минимально необходимые заголовки.",
+  "ИНСТРУМЕНТЫ (ровно один за шаг):",
+  "- spec.hints: перечисли кандидаты URL спецификации и документации для именованных сервисов.",
+  "- openapi.probe: попробуй типовые пути спеки относительно *_BASE_URL.",
+  "- openapi.load: загрузка и сводка OpenAPI по прямой ссылке.",
+  "- web.search: поиск страниц документации и примеров.",
+  "- http: выполнение конкретного HTTP-запроса.",
+  "- script.save: сохрани финальный запрос (server выполнит его автоматически).",
+  "- script.run: запуск сохранённого/сформированного запроса.",
+  "ФОРМАТ ВЫЗОВА ИНСТРУМЕНТА: оформляй JSON в блоке ```tool ... ```.",
+  "ЗАВЕРШЕНИЕ: дай краткий лог шагов (не мысли): что нашёл (OpenAPI/Docs), какой запрос выполнил (метод/путь, статус), какие исправления внёс."
+].join("\n");
 
 /* ---------- ROUTES ---------- */
 app.get("/api/health", function(_req,res){ res.json({ok:true}); });
@@ -268,6 +294,35 @@ app.post("/api/env-file", function(req,res){
   const content = String((req.body && req.body.content) || "");
   try { if (fs.existsSync(ENV_FILE)) { const bak = ENV_FILE + "." + new Date().toISOString().replace(/[:.]/g,"-") + ".bak"; fs.copyFileSync(ENV_FILE, bak); } } catch {}
   fs.writeFileSync(ENV_FILE, content); res.json({ ok:true });
+});
+
+// Connections CRUD
+app.get("/api/connections", function(_req,res){
+  const data = readJsonSafe(CONN_FILE, { connections: [] });
+  const safe = (data.connections||[]).map(function(c){
+    return { id:c.id, name:c.name||c.id, baseUrl:c.baseUrl||"", token: mask(c.token||""), openapiUrl:c.openapiUrl||"", apiDocUrl:c.apiDocUrl||"" };
+  });
+  res.json({ connections: safe });
+});
+app.post("/api/connections", function(req,res){
+  const b = req.body || {};
+  const idRaw = b.id || b.name || "";
+  const id = normalizeId(idRaw);
+  if (!id) return res.status(400).json({ error:"Missing id" });
+  const entry = { id, name: b.name || id, baseUrl: String(b.baseUrl||""), token: String(b.token||""), openapiUrl: String(b.openapiUrl||""), apiDocUrl: String(b.apiDocUrl||"") };
+  const data = readJsonSafe(CONN_FILE, { connections: [] });
+  const idx = (data.connections||[]).findIndex(function(c){ return normalizeId(c.id)===id; });
+  if (idx>=0) data.connections[idx] = { ...data.connections[idx], ...entry };
+  else (data.connections = data.connections || []).unshift(entry);
+  writeJsonSafe(CONN_FILE, data);
+  res.json({ ok:true, id });
+});
+app.delete("/api/connections/:id", function(req,res){
+  const id = normalizeId(req.params.id||"");
+  const data = readJsonSafe(CONN_FILE, { connections: [] });
+  data.connections = (data.connections||[]).filter(function(c){ return normalizeId(c.id)!==id; });
+  writeJsonSafe(CONN_FILE, data);
+  res.json({ ok:true });
 });
 
 app.get("/api/scripts", function(_req,res){ res.json(readJsonSafe(SCRIPTS_FILE, { scripts: [] })); });
