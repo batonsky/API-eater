@@ -247,9 +247,17 @@ async function callOpenAI(messages){
   return message;
 }
 function extractToolCall(text){
+  // Accept blocks like: ```tool { ... } ```
   const m = text && text.match(/```tool\s+([\s\S]+?)\s+```/);
   if (!m) return null;
-  try { return JSON.parse(m[1]); } catch { return null; }
+  try {
+    const raw = JSON.parse(m[1]);
+    if (!raw || typeof raw !== 'object') return null;
+    // Normalize variants: tool/tool_name/name and args/arguments/params
+    if (!raw.tool) raw.tool = raw.tool_name || raw.name;
+    if (!raw.args) raw.args = raw.arguments || raw.params || raw.parameters;
+    return raw;
+  } catch { return null; }
 }
 
 /* ---------- SYSTEM PROMPT ---------- */

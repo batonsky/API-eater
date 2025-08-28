@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 type Msg = { role: "user" | "assistant" | "system"; content: string; kind?: "reply" | "action" | "status" };
 type Step = { tool: string; ok: boolean; args?: any; result?: any; error?: string };
 
-const DEFAULT_API_BASE = (import.meta as any).env.VITE_API_BASE || (typeof window !== "undefined" ? window.location.origin.replace(/:\\d+$/, ":4001") : "http://localhost:4001");
+const API_BASE = (import.meta as any).env.VITE_API_BASE || (typeof window !== "undefined" ? window.location.origin.replace(/:\\d+$/, ":4001") : "http://localhost:4001");
 
 function iconForTool(t: string) {
   if (t === "env.list") return "🧩";
@@ -18,11 +18,6 @@ function iconForTool(t: string) {
 }
 
 export default function App() {
-  const [apiBase, setApiBase] = useState<string>(() => {
-    const saved = (typeof window !== 'undefined') ? localStorage.getItem('apiBase') : null;
-    return saved || DEFAULT_API_BASE;
-  });
-  useEffect(()=>{ try { localStorage.setItem('apiBase', apiBase); } catch {} }, [apiBase]);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Msg[]>([
     {
@@ -51,7 +46,7 @@ export default function App() {
   // Connections load/save
   const reloadConns = async () => {
     try {
-      const r = await fetch(`${apiBase}/api/connections`);
+      const r = await fetch(`${API_BASE}/api/connections`);
       const t = await r.text();
       const j = t ? JSON.parse(t) : { connections: [] };
       setConnections(j.connections || []);
@@ -67,7 +62,7 @@ export default function App() {
       setConnNotice("");
       const body = { ...connForm };
       if (!body.id && body.name) body.id = body.name;
-      const r = await fetch(`${apiBase}/api/connections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const r = await fetch(`${API_BASE}/api/connections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (!r.ok) {
         const msg = await r.text();
         throw new Error(`Не удалось сохранить (${r.status}): ${msg}`);
@@ -83,7 +78,7 @@ export default function App() {
     }
   };
   const deleteConn = async (id: string) => {
-    await fetch(`${apiBase}/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
+    await fetch(`${API_BASE}/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
     reloadConns();
   };
   useEffect(() => {
@@ -103,7 +98,7 @@ export default function App() {
     setBusy(true);
     setSteps([]);
     try {
-      const r = await fetch(`${apiBase}/api/agent/chat`, {
+      const r = await fetch(`${API_BASE}/api/agent/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: [...messages, mUser], allowWeb: true, allowHttp: true }),
@@ -185,18 +180,6 @@ export default function App() {
 
         {/* Sidebar */}
         <div className="list">
-          <div className="card">
-            <div className="header">Адрес backend API</div>
-            <div className="section">
-              <input className="input" value={apiBase} onChange={(e)=>setApiBase(e.target.value)} placeholder="http://<host>:4001" />
-            </div>
-            <div className="section">
-              <div className="row">
-                <button className="btn" onClick={reloadConns}>Проверить подключение</button>
-              </div>
-              <div className="small" style={{marginTop:8}}>Измените при необходимости. Сохраняется в браузере.</div>
-            </div>
-          </div>
           <div className="card">
             <div className="header">Подключения к API (секреты отдельно)</div>
             <div className="section">
